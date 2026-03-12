@@ -1,0 +1,227 @@
+# VRP Trading System — Configuration
+# All parameters trace back to docs/mathematical_design_production.md
+
+# ── System ──
+system:
+  phase: 1                        # 1, 2, 3, or 4
+  stage: 1                        # Phase 4 only: 1, 2, or 3
+  log_level: "INFO"
+
+# ── Data Sources ──
+data:
+  spx_ticker: "^GSPC"
+  fred:
+    vix_series: "VIXCLS"
+    vix3m_series: "VXVCLS"
+    rate_series: "DGS10"
+  polygon:
+    base_url: "https://api.polygon.io"
+    options_underlying: "SPX"
+  cache:
+    base_dir: "data/raw"
+    format: "parquet"
+    max_age_days: 90
+
+# ── Features ──
+features:
+  rv_windows: [5, 21, 63]
+  vrp_zscore_window: 252
+  vol_acceleration_window: 5
+
+# ── Regime Detection ──
+regime:
+  hmm:
+    n_states: 3
+    covariance_type: "full"
+    n_iter: 200
+    n_init: 10
+    min_training_days: 504
+    stability_threshold: 0.90
+  xgboost:
+    n_estimators: 200
+    max_depth: 4
+    calibration_method: "isotonic"
+    max_brier_score: 0.25
+  centroids:
+    low_vol:
+      rv_max: 0.12
+      vix_max: 15
+    normal_vol:
+      rv_range: [0.12, 0.20]
+      vix_range: [15, 25]
+    high_vol:
+      rv_min: 0.20
+      vix_min: 25
+
+# ── Pricing ──
+pricing:
+  phase1_model: "black_scholes"
+  phase2_model: "heston"
+  fft:
+    n_points: 4096
+    damping_alpha: 1.5
+  heston:
+    param_bounds:
+      v0: [0.001, 1.0]
+      kappa: [0.1, 10.0]
+      theta: [0.01, 1.0]
+      sigma_v: [0.1, 2.0]
+      rho: [-0.95, -0.1]
+    enforce_feller: true
+    calibration:
+      optimizer: "de_then_lm"
+      de_max_iter: 200
+      lm_max_iter: 100
+      max_time_sec: 30
+    fallback:
+      max_consecutive_failures: 3
+
+# ── Strategy ──
+strategy:
+  underlying: "SPX"
+  type: "put_credit_spread"
+  entry:
+    target_dte_min: 30
+    target_dte_max: 45
+    target_delta: -0.10
+    spread_width: 50
+    entry_day: "tuesday"
+    min_premium_ratio: 0.10
+    vrp_zscore_min: -1.0
+    regime_thresholds:
+      full_position: 0.20
+      half_position: 0.50
+      skip: 0.50
+      emergency_close: 0.80
+  exit:
+    profit_target_pct: 0.75
+    stop_loss_multiple: 2.0
+    close_dte: 7
+  strike_increments: 5
+
+# ── Risk Management ──
+risk:
+  vol_scaling:
+    target_vol: 0.12
+    max_leverage: 1.5
+    min_leverage: 0.3
+    vol_window: 20
+  kelly:
+    shrinkage_alpha_steady: 0.6
+    shrinkage_alpha_hv_transition: 0.9
+    shrinkage_alpha_other_transition: 0.75
+    transition_window_days: 5
+    mu_prior:
+      low_vol: 0.15
+      normal_vol: 0.08
+      high_vol: 0.02
+    rolling_window: 60
+    f_min: 0.2
+    f_max: 2.0
+  drawdown:
+    warn: 0.05
+    reduce: 0.05
+    kill: 0.10
+  stage_overrides:
+    stage_1:
+      target_vol: 0.08
+      dd_reduce: 0.03
+      dd_kill: 0.07
+      kelly_f_max: 1.0
+      min_premium_ratio: 0.12
+      regime_skip_threshold: 0.40
+      max_contracts: 3
+
+# ── Execution ──
+execution:
+  mode: "paper"
+  ibkr:
+    host: "127.0.0.1"
+    paper_port: 7497
+    live_port: 7496
+    client_id: 1
+    timeout_sec: 60
+  orders:
+    type: "limit"
+    aggressive_after_sec: 30
+    cancel_after_sec: 120
+  costs:
+    commission_per_contract: 0.65
+    slippage_normal_pct: 0.25
+    slippage_stress_pct: 0.50
+
+# ── Orchestration ──
+orchestration:
+  daily:
+    time: "16:30"
+    timezone: "US/Eastern"
+    early_close_time: "13:30"
+  weekly:
+    time: "17:15"
+    day: "tuesday"
+  monthly:
+    time: "18:00"
+    day: 1
+  xgboost_retrain_day: "friday"
+  retry:
+    data_fetch:
+      max_retries: 3
+      delay_sec: 300
+    ibkr_connect:
+      max_retries: 3
+      delay_sec: 60
+    order_execution:
+      max_retries: 3
+      delay_sec: 60
+  misfire_grace_sec: 3600
+
+# ── Alerts ──
+alerts:
+  email:
+    enabled: true
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    sender: "vrp-bot@example.com"
+    recipient: "you@example.com"
+  escalation:
+    consecutive_warn_to_critical: 3
+
+# ── Database ──
+database:
+  path: "data/vrp.db"
+
+# ── Backtest ──
+backtest:
+  phase1:
+    start_date: "2004-01-01"
+    end_date: "2025-12-31"
+    initial_capital: 100000
+  phase2:
+    initial_capital: 100000
+  cpcv:
+    n_groups: 5
+    k_test: 2
+    embargo_days: 5
+  go_nogo:
+    phase1:
+      min_sharpe: 0.4
+      max_mdd: 0.30
+      min_regime_sharpe_diff: 0.1
+      max_cvar_95: -0.08
+      max_worst_month: -0.15
+      min_positive_months: 0.70
+      max_2008_dd: 0.25
+      max_2020_dd: 0.20
+      min_cpcv_sharpe: 0.3
+      max_pbo: 0.05
+    phase2:
+      min_sharpe: 0.5
+      max_mdd: 0.25
+      min_win_rate: 0.75
+      min_win_loss_ratio: 0.3
+      max_cvar_95: -0.06
+      max_worst_month: -0.12
+      min_stress_sharpe: 0.3
+      min_phase_correlation: 0.5
+      min_cal_success_rate: 0.95
+      max_pbo: 0.05
